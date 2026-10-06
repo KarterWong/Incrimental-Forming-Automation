@@ -1,0 +1,230 @@
+import pyvista as pv
+import csv 
+import pandas as pd 
+import numpy as np
+
+mesh = pv.read('freeform_test_5.stl')  # Load the STL file and name it "mesh"
+points = mesh.points  # Get the point cloud from "mesh"
+with open('dots.csv', 'w') as f:  # Create a new CSV file
+    writer = csv.writer(f)  # Set to write mode
+    writer.writerows(points)  # Write the point cloud
+
+df = pd.read_csv('dots.csv')  # Open the CSV file with pandas
+df = df.dropna()  # Remove blank rows
+df = df.set_axis(['x', 'y', 'z'], axis='columns')  # Label columns as x, y, z (with space for row numbers)
+maxi = df['z'].max() 
+mini = df['z'].min() 
+df = df[df['z'] > mini + 0.01]  # Remove the bottom plane
+df.to_csv('dots.csv')  # Overwrite the CSV file
+df = pd.read_csv('dots.csv')  # Re-open the CSV file with pandas
+ll = [0, 0, 0]  # Specify that this is a 3-dimensional numeric array
+pp = [0, 0, 200]  # Set a hypothetical initial tool position
+
+while len(df) > 0:
+    s = df['z'].max()  # Find the maximum value along the z-axis
+    df_z = df[df['z'] == s]
+    df_z.to_csv('layer.csv')
+    df_z = pd.read_csv('layer.csv')
+    df_z = df_z.drop(df_z.columns[[0, 1]], axis=1)
+    df_z.to_csv('layer.csv')
+    p = df_z['z'].idxmax()  # Maximum value on the z-axis, starting from this point for processing
+    l = np.loadtxt('layer.csv', delimiter=',', dtype='float64', skiprows=1, usecols=[1, 2, 3])  # Convert from CSV to ndarray
+    n = len(df_z)  # Get total number in df
+    c = 0 
+    if n == 1:
+        pp = l
+    ltp = [0, 0, 0]  # Tool path design order
+    if n > 1:
+        while n > 0:
+            j = 0 
+            ld = [] 
+            if c == 3:
+                l = np.vstack([l, llk]) 
+                n = n + 1
+            while j < n:
+                ld.append(np.linalg.norm(pp - l[j]))  # Calculate and list distances from p
+                j += 1
+            k = ld.index(min(ld))  # Index of the smallest value in ld
+            lk = l[k]  # Array at the index of the smallest value in l
+            ltp = np.vstack([ltp, lk])  # Add lk vertically as an array to ltp
+            if c == 0:
+                llk = lk 
+            ld.pop(k)  # Delete the k-th element in ld
+            l = np.delete(l, k, 0)  # Delete the k-th row in l
+            n -= 1  # Reduce n by one
+            pp = lk  # Set next p as the current k
+            c += 1
+        ltp = np.delete(ltp, 0, 0) 
+        ll = np.vstack([ll, ltp])
+    else:
+        ltp = np.delete(ltp, 0, 0) 
+        ll = np.vstack([ll, l]) #Transform df to remaining layers
+    df=df[df['z']<s]
+ll = np.round(ll, 3)  # Round to 3 significant digits
+
+with open('toolpath.csv', 'w') as f: 
+    writer = csv.writer(f) 
+    writer.writerows(ll)  # Save ll to CSV
+
+
+
+
+toolpath = pd.read_csv('toolpath.csv', names=['x', 'y', 'z'], skiprows=1) # Load the tool path data from the CSV file
+
+
+def is_layer_circular(points, tolerance=0.1):# Define a function to test circularity of a layer
+    
+    centroid = points[['x', 'y']].mean().values # Calculate the centroid of the layer in the x-y plane
+    
+    # Calculate distances of each point from the centroid
+    distances = np.linalg.norm(points[['x', 'y']].values - centroid, axis=1)
+    mean_distance = distances.mean()
+    std_dev = distances.std()
+    
+    return (std_dev / mean_distance) < tolerance# Check if the relative standard deviation is within the tolerance
+
+
+z_levels = toolpath['z'].unique() # Group tool path by z-level
+circular_layers = 0
+
+# Check circularity for each layer
+for z in z_levels:
+    layer_points = toolpath[toolpath['z'] == z]
+    if len(layer_points) < 3:
+        continue  # Skip layers with fewer than 3 points (not enough data to determine circularity)
+    
+    if is_layer_circular(layer_points):
+        circular_layers += 1
+        print(f"Layer at z={z} is circular.")
+    else:
+        print(f"Layer at z={z} is not circular.")
+
+# Calculate the percentage of circular layers
+total_layers = len(z_levels)
+circularity_percentage = (circular_layers / total_layers) * 100
+print(f"Circularity of tool path: {circularity_percentage:.2f}%")
+
+# Decision based on threshold for circular layers
+if circularity_percentage > 90:  # Arbitrary threshold, e.g., 90%
+    while len(df) > 0:
+        s = df['z'].max()  # Find the maximum value along the z-axis
+    df_z = df[df['z'] == s]
+    df_z.to_csv('layer.csv')
+    df_z = pd.read_csv('layer.csv')
+    df_z = df_z.drop(df_z.columns[[0, 1]], axis=1)
+    df_z.to_csv('layer.csv')
+    l = np.loadtxt('layer.csv', delimiter=',', dtype='float64', skiprows=1, usecols=[1, 2, 3])  # Convert from CSV to ndarray
+    n = len(df_z)  # Get total number in df
+    c = 0 
+    if n == 1:
+        pp = l
+    ltp = [0, 0, 0]  # Tool path design order
+    if n > 1:
+        while n > 0:
+            j = 0 
+            ld = [] 
+            if c == 3:
+                l = np.vstack([l, llk]) 
+                n = n + 1
+            while j < n:
+                ld.append(np.linalg.norm(pp - l[j]))  # Calculate and list distances from p
+                j += 1
+            k = ld.index(min(ld))  # Index of the smallest value in ld
+            lk = l[k]  # Array at the index of the smallest value in l
+            ltp = np.vstack([ltp, lk])  # Add lk vertically as an array to ltp
+            if c == 0:
+                llk = lk 
+            ld.pop(k)  # Delete the k-th element in ld
+            l = np.delete(l, k, 0)  # Delete the k-th row in l
+            n -= 1  # Reduce n by one
+            pp = lk  # Set next p as the current k
+            c += 1
+        ltp = np.delete(ltp, 0, 0) 
+        ll = np.vstack([ll, ltp])
+    else:
+        ltp = np.delete(ltp, 0, 0) 
+        ll = np.vstack([ll, l]) #Transform df to remaining layers
+    df=df[df['z']<s]
+    ll = np.round(ll, 3)  # Round to 3 significant digits
+else:
+    while len(df) > 0:
+        # Select the current highest layer
+        s = df['z'].max()
+        df_z = df[df['z'] == s]
+        
+        # Sort points in the layer by both x and y coordinates
+        df_z = df_z.sort_values(by=['y', 'x'])
+        l = df_z[['x', 'y', 'z']].to_numpy()
+        n = len(df_z)
+        
+        # Create square pattern toolpath
+        if n > 1:
+            layer_path = []
+            while len(l) > 0:
+                # Find min and max of x and y in the current subset
+                min_x, max_x = l[:, 0].min(), l[:, 0].max()
+                min_y, max_y = l[:, 1].min(), l[:, 1].max()
+                
+                # Define the four sides of the current "square" ring
+                top = l[(l[:, 1] == min_y) & (l[:, 0] >= min_x) & (l[:, 0] <= max_x)]
+                right = l[(l[:, 0] == max_x) & (l[:, 1] > min_y) & (l[:, 1] <= max_y)]
+                bottom = l[(l[:, 1] == max_y) & (l[:, 0] <= max_x) & (l[:, 0] >= min_x)][::-1]
+                left = l[(l[:, 0] == min_x) & (l[:, 1] <= max_y) & (l[:, 1] > min_y)][::-1]
+                
+                # Combine the four sides to form a square ring path
+                square_ring = np.vstack([top, right, bottom, left])
+                layer_path.append(square_ring)
+                
+                # Remove the points in the current square ring from l
+                l = np.array([point for point in l if point not in square_ring])
+            
+            # Add each square ring to the final toolpath (ll)
+            for ring in layer_path:
+                ll = np.vstack([ll, ring])
+
+    # Update the remaining points by excluding the current layer
+    df = df[df['z'] < s]
+
+# Round the final tool path for cleaner G-code output
+ll = np.round(ll, 3)
+
+with open('toolpath.csv', 'w') as f:
+    writer = csv.writer(f)
+    writer.writerows(ll)
+
+
+
+df_ltp = pd.read_csv('toolpath.csv') 
+df_ltp = df_ltp.set_axis(['x', 'y', 'z'], axis='columns') 
+df_ltp.to_csv('toolpath.csv')  # Convert to G-code from here
+
+l = np.loadtxt('toolpath.csv', delimiter=',', dtype='float64', skiprows=1, usecols=[1, 2, 3]) 
+lx = l[:, 0]  # 0th column of l
+ly = l[:, 1]  # 1st column of l
+lz = l[:, 2]  # 2nd column of l
+
+map1 = map(str, lx) 
+lx = list(map1)  # Change data type to string
+map2 = map(str, ly) 
+ly = list(map2)  # Change data type to string
+map3 = map(str, lz) 
+lz = list(map3)  # Change data type to string
+
+n = len(df_ltp) 
+for i in range(n): 
+    lx[i] = ('X' + lx[i])  # Add "X" prefix to n coordinates
+for i in range(n): 
+    ly[i] = ('Y' + ly[i])  # Add "Y" prefix to n coordinates
+for i in range(n): 
+    lz[i] = ('Z' + lz[i])  # Add "Z" prefix to n coordinates
+
+df_gchord = pd.DataFrame(data={'G': 'G01', 'x': lx, 'y': ly, 'z': lz, 'EOB': ';'})
+glist = df_gchord.values
+
+outf = open("Gchord.csv", 'w', newline='') 
+writer = csv.writer(outf) 
+writer.writerows(glist) 
+outf.close() 
+df_g = pd.read_csv('Gchord.csv') 
+
+df_g.to_csv('Gchord.txt', index=False, sep=" ")

@@ -1,0 +1,80 @@
+import pyvista as pv
+import csv
+import pandas as pd
+import numpy as np
+
+mesh = pv.read('freeform_test_3.stl')
+points = mesh.points
+with open('dots.csv', 'w') as f:
+    writer = csv.writer(f)
+    writer.writerows(points)
+
+df = pd.read_csv('dots.csv')
+df = df.dropna()
+df = df.set_axis(['x', 'y', 'z'], axis='columns')
+maxi = df['z'].max()
+mini = df['z'].min()
+df = df[df['z'] > mini + 0.01]
+df.to_csv('dots.csv')
+df = pd.read_csv('dots.csv')
+ll = [0, 0, 0]
+pp = [0, 0, 200]
+
+while len(df) > 0:
+    # Select the current highest layer
+    s = df['z'].max()
+    df_z = df[df['z'] == s]
+    
+    # Sort points in the layer by x-coordinate to follow a left-to-right pattern
+    df_z = df_z.sort_values(by='x', ascending=True)
+    
+    # Convert sorted DataFrame to a numpy array for tool path planning
+    l = df_z[['x', 'y', 'z']].to_numpy()
+    n = len(df_z)
+    
+    # Zigzag pattern along the x-axis
+    if n > 1:
+        for i in range(0, n, 2):
+            # For even rows, go left to right
+            ltp = l[i:i+2]
+            ll = np.vstack([ll, ltp])
+            
+            # For odd rows, reverse to go right to left (for zigzag effect)
+            ltp = l[i+2:i+4][::-1]
+            ll = np.vstack([ll, ltp])
+    else:
+        ll = np.vstack([ll, l])
+
+    # Update the remaining points by excluding the current layer
+    df = df[df['z'] < s]
+
+# Round the final tool path for cleaner G-code output
+ll = np.round(ll, 3)
+
+with open('toolpath.csv', 'w') as f:
+    writer = csv.writer(f)
+    writer.writerows(ll)
+
+# Convert to G-code format
+df_ltp = pd.read_csv('toolpath.csv')
+df_ltp = df_ltp.set_axis(['x', 'y', 'z'], axis='columns')
+df_ltp.to_csv('toolpath.csv')
+
+l = np.loadtxt('toolpath.csv', delimiter=',', dtype='float64', skiprows=1, usecols=[1, 2, 3])
+lx = l[:, 0]
+ly = l[:, 1]
+lz = l[:, 2]
+
+lx = ['X' + str(x) for x in lx]
+ly = ['Y' + str(y) for y in ly]
+lz = ['Z' + str(z) for z in lz]
+
+df_gchord = pd.DataFrame(data={'G': 'G01', 'x': lx, 'y': ly, 'z': lz, 'EOB': ';'})
+glist = df_gchord.values
+
+with open("Gchord.csv", 'w', newline='') as outf:
+    writer = csv.writer(outf)
+    writer.writerows(glist)
+
+df_g = pd.read_csv('Gchord.csv')
+df_g.to_csv('Gchord.txt', index=False, sep=" ")

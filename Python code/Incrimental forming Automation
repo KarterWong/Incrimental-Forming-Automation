@@ -1,0 +1,300 @@
+#Incrimental forming Automation system
+"""
+This script processes an STL file to generate a toolpath for the incrimental forming process.
+On a broad scale, it performs the following steps:
+1. Load and parse the STL file to extract 3D points.
+2. Slice the model into layers based on Z height.
+3. For each layer:
+   - Narrow down the points using convex hull to the nessisary amount of points.
+    - Apply a reverse offset to account for tool diameter.
+    - Sort the points to create a continuous, non-overlapping path.
+4. Compile the toolpath across all layers.
+5. Export the toolpath to a CSV file.
+6. Convert the CSV toolpath into G-code format for use in a CNC machine .
+"""
+
+import pandas as pd
+import numpy as np 
+from scipy.spatial import ConvexHull  
+from stl import mesh  
+#============================== Adjustable variables ==============================
+"""
+These define key settings for toolpath generation, such as tool size, offsets, and layer details.
+
+Tool_diameter: Diameter of the forming tool, used for reverse offsetting the path.
+Z_springback_offset: Adjustment in Z to account for material springback after forming.
+LAYER_THICKNESS: Thickness of each layer when slicing the STL model.
+MIN_DISTANCE: Minimum distance between points to avoid clustering.
+Z_OFFSET: Global Z offset to drop the entire toolpath.
+SAFE_Z_RELATIVE: Relative safe Z height for retraction at the end of the toolpath
+
+"""
+TOOL_DIAMETER = 3.4
+Z_SPRINGBACK_OFFSET = -0.1
+LAYER_THICKNESS = 0.5
+MIN_DISTANCE = 0.5
+Z_OFFSET = 50.5 
+SAFE_Z_RELATIVE = 50.0
+
+#============================== Load and preprocess STL ==============================
+"""
+Load STL file and extract points
+This function loads an STL converts it into a mesh, flattens vertices into a DataFrame, removes duplicates,
+and rounds Z values to layer thickness for slicing.
+
+"""
+def load_stl_to_dataframe(stl_file, layer_thickness=1.0):
+    stl_mesh = mesh.Mesh.from_file(stl_file)  # Load the STL file into a mesh object
+    vertices = stl_mesh.vectors.reshape(-1, 3)  # Flatten the triangle vertices into a 2D array
+    df = pd.DataFrame(vertices, columns=['x', 'y', 'z'])  # Convert to DataFrame for easier manipulation
+    df = df.drop_duplicates().reset_index(drop=True)  # Remove duplicate points
+    df['z'] = np.round(df['z'] / layer_thickness) * layer_thickness  # Round Z to nearest layer multiple
+    return df.dropna()  # Drop any rows with NaN values
+
+# Filter close points to prevent clustering
+# This function removes points that are too close together to reduce redundancy in the path.
+def filter_close_points(points, min_distance=0.5):
+    filtered = [points[0]]  # Start with the first point
+    for p in points[1:]:  # Iterate through remaining points
+        if np.linalg.norm(p - filtered[-1]) >= min_distance:  # Check distance to last filtered point
+            filtered.append(p)  # Add if sufficiently distant
+    return np.array(filtered)  # Return as NumPy array
+
+# Sort points to prevent doubling back
+# This function sorts points angularly around the center and resolves any self-intersections
+# by reversing segments if needed, ensuring a non-overlapping path.
+def sort_points_no_overlap(points):
+    center = points.mean(axis=0)  # Compute centroid of points
+    angles = np.arctan2(points[:, 1] - center[1], points[:, 0] - center[0])  # Compute angles from center
+    sorted_indices = np.argsort(angles)  # Sort indices by angle
+    sorted_points = points[sorted_indices]  # Apply sorting
+    n = len(sorted_points)
+    for i in range(n):  # Check for intersections in the sorted path
+        p1, p2 = sorted_points[i], sorted_points[(i + 1) % n]
+        for j in range(i + 2, n):
+            p3, p4 = sorted_points[j], sorted_points[(j + 1) % n]
+            if intersects(p1, p2, p3, p4):  # If segments intersect
+                sorted_points[i + 1:j + 1] = sorted_points[i + 1:j + 1][::-1]  # Reverse the segment to untangle
+    return sorted_points
+
+# Check if segments intersect
+# Helper function to determine if two line segments cross using the CCW (counter-clockwise) test.
+def intersects(p1, p2, p3, p4):
+    def ccw(A, B, C):  # Counter-clockwise orientation check
+        return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+    # Check if points are on opposite sides of each segment
+    return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
+
+# Smooth hull points
+# This applies a simple smoothing filter to the points, blending each with its neighbors.
+def smooth_hull_points(points, alpha=0.3):
+    smoothed = points.copy()  # Copy original points
+    for i in range(len(points)):  # For each point
+        prev = points[(i - 1) % len(points)]  # Previous neighbor (wrap around)
+        next = points[(i + 1) % len(points)]  # Next neighbor (wrap around)
+        smoothed[i] = (1 - alpha) * points[i] + alpha * (prev + next) / 2  # Weighted average
+    return smoothed
+
+# Apply reverse offset using centroid-based method
+# This function shrinks the path inward by the tool diameter (reverse offset) to account for tool width,
+# applies Z springback, smooths the result, and logs details.
+def reverse_offset(points, TOOL_DIAMETER=2.5, z_springback_offset=-0.1):
+    adjusted_points = points.copy()  # Copy original points
+    center = points[:, :2].mean(axis=0)  # Compute 2D centroid
+    distances = np.linalg.norm(points[:, :2] - center, axis=1)  # Distances from center
+    layer_radius = distances.max() if distances.size > 0 else 1.0  # Max radius
+    print(f"Layer at Z={points[0, 2]:.2f}, points={len(points)}, radius={layer_radius:.2f} mm, TOOL_DIAMETER={TOOL_DIAMETER:.2f} mm")
+    for i, point in enumerate(adjusted_points):  # For each point
+        direction = point[:2] - center  # Vector from center
+        norm = np.linalg.norm(direction)  # Normalize
+        if norm > 1e-6:
+            direction /= norm
+            offset = TOOL_DIAMETER * direction  # Compute inward offset
+            adjusted_points[i, :2] -= offset  # Apply offset
+            print(f"Point {i}: Offset applied = {offset[0]:.2f}, {offset[1]:.2f}")
+        adjusted_points[i, 2] += z_springback_offset  # Apply Z adjustment
+    adjusted_points[:, :2] = smooth_hull_points(adjusted_points[:, :2])  # Smooth XY coordinates
+    # Compute and log bounding box and adjusted radius
+    x_min, x_max = adjusted_points[:, 0].min(), adjusted_points[:, 0].max()
+    y_min, y_max = adjusted_points[:, 1].min(), adjusted_points[:, 1].max()
+    adj_distances = np.linalg.norm(adjusted_points[:, :2] - center, axis=1)
+    adj_layer_radius = adj_distances.max() if adj_distances.size > 0 else 1.0
+    print(f"Adjusted radius={adj_layer_radius:.2f} mm")
+    print(f"Bounding box: X=[{x_min:.2f}, {x_max:.2f}], Y=[{y_min:.2f}, {y_max:.2f}]")
+    return adjusted_points
+
+# Load reference toolpath from STL file
+# Specify the input STL file and load it into a DataFrame using the function above.
+stl_file = 'freeform_test_17v4.stl'
+df = load_stl_to_dataframe(stl_file, layer_thickness=LAYER_THICKNESS)
+
+#================================== Toolpath generation ==========================
+"""
+This processes each Z layer: computes hull, filters, offsets, sorts, and builds the full path.
+
+"""
+ll = []  # List to accumulate all toolpath points
+prev_exit_point = None  # Track exit point from previous layer for continuity
+z_levels = sorted(df['z'].unique(), reverse=True)  # Get unique Z levels, sorted descending
+
+# Calculate the desired uniform layer spacing
+# Compute average spacing from input Z levels for uniform reassignment.
+if len(z_levels) > 1:
+    z_diffs = [z_levels[i] - z_levels[i + 1] for i in range(len(z_levels) - 1)]
+    avg_spacing = np.mean(z_diffs)
+    print(f"Average layer spacing in input data: {avg_spacing:.3f} mm")
+else:
+    avg_spacing = 1
+    print("Only one Z level in input data, using default spacing of 1 mm")
+
+# Reassign Z levels to be uniformly spaced
+# Create new uniform Z values starting from the top.
+uniform_z_levels = []
+start_z = z_levels[0]
+for i in range(len(z_levels)):
+    new_z = start_z - i * avg_spacing
+    uniform_z_levels.append(new_z)
+
+# Calculate the center of the first layer for the initial move
+# Find centroid of the first valid layer (with >=5 points) or fallback to (0,0).
+center_x, center_y = None, None
+for layer_idx, current_layer_z in enumerate(z_levels):
+    current_layer = df[df['z'] == current_layer_z][['x', 'y', 'z']].values
+    if len(current_layer) >= 5:
+        center_x, center_y = current_layer[:, :2].mean(axis=0)
+        break
+if center_x is None or center_y is None:
+    print("Warning: Could not compute center from any layer. Using (0, 0) as fallback.")
+    center_x, center_y = 0.0, 0.0
+
+# Process each layer with the new uniform Z levels
+for layer_idx, current_layer_z in enumerate(z_levels):
+    current_layer = df[df['z'] == current_layer_z][['x', 'y', 'z']].values  # Extract layer points
+    if len(current_layer) < 5:  # Skip if too few points
+        print(f"Skipping layer at Z={current_layer_z:.2f} due to insufficient points ({len(current_layer)})")
+        continue
+    
+    layer_points_2d = current_layer[:, :2]  # 2D projection for hull
+    try:
+        hull = ConvexHull(layer_points_2d)  # Compute convex hull
+        hull_coords = layer_points_2d[hull.vertices]  # Get hull vertices
+    except Exception as e:  # Handle hull computation errors
+        print(f"Skipping layer at Z={current_layer_z:.2f} due to hull error: {str(e)})")
+        continue
+    
+    if hull_coords.shape[0] < 5:  # Skip if hull has too few points
+        print(f"Skipping layer at Z={current_layer_z:.6f} due to insufficient hull vertices ({hull_coords.shape[0]})")
+        continue
+    
+    hull_coords = filter_close_points(hull_coords, min_distance=MIN_DISTANCE)  # Filter close points
+    
+    hull_z = np.full((hull_coords.shape[0], 1), uniform_z_levels[layer_idx])  # Assign uniform Z
+    hull_points_3d = np.hstack([hull_coords, hull_z])  # Combine to 3D
+    
+    adjusted_points_3d = reverse_offset(hull_points_3d, TOOL_DIAMETER=TOOL_DIAMETER, z_springback_offset=Z_SPRINGBACK_OFFSET)  # Apply offset
+    adjusted_points_2d = adjusted_points_3d[:, :2]  # 2D for sorting
+    
+    sorted_points = sort_points_no_overlap(adjusted_points_2d)  # Sort without overlaps
+    
+    # For the first layer, start at the point closest to the centroid
+    if layer_idx == 0:
+        centroid = np.array([center_x, center_y])
+        dists = np.linalg.norm(sorted_points - centroid, axis=1)  # Find closest to center
+        start_idx = np.argmin(dists)
+        sorted_points = np.roll(sorted_points, -start_idx, axis=0)  # Rotate to start there
+    elif prev_exit_point is not None:  # For subsequent layers, start near previous exit
+        dists = np.linalg.norm(sorted_points - prev_exit_point[:2], axis=1)
+        start_idx = np.argmin(dists)
+        sorted_points = np.roll(sorted_points, -start_idx, axis=0)
+    
+    sorted_layer = np.hstack([sorted_points, np.full((sorted_points.shape[0], 1), adjusted_points_3d[0, 2])])  # Add Z back
+    layer_path = list(sorted_layer)
+    layer_path.append(layer_path[0])  # Close the loop by appending first point
+    ll.extend(layer_path)  # Add to total toolpath
+    prev_exit_point = layer_path[0]  # Update exit point
+
+if len(ll) == 0:  # Handle case where no points were generated
+    print("Warning: No toolpath points generated. Check input data or layer filtering.")
+    exit()
+
+#================================== Export toolpath ==========================
+"""
+Finalize toolpath and export to CSV and G-code adding quality of life features to reduce the amount of time 
+spent setting up the CNC machine.
+
+Allowing for a "plug and play" style operation where the operator only needs to set the zero point and start the program.
+
+"""
+
+# Apply Z offset to drop the toolpath
+# Subtract a global Z offset from all points to adjust the height.
+ll = np.array(ll)
+ll[:, 2] -= Z_OFFSET  # Subtract z_offset from all Z coordinates
+
+# Round toolpath coordinates to 2 decimal places
+# For precision in output files.
+ll = np.round(ll, 2)
+
+# Save toolpath to CSV
+# Output the processed points as a CSV file.
+pd.DataFrame(ll, columns=['x', 'y', 'z']).to_csv('toolpath.csv', index=False)
+
+# Convert to G-code
+# Load the CSV back and format into G-code commands.
+df_ltp = pd.read_csv('toolpath.csv')
+
+# Round coordinates to 2 decimal places and format explicitly
+# Ensure consistent formatting for G-code.
+df_ltp['x'] = df_ltp['x'].round(2)
+df_ltp['y'] = df_ltp['y'].round(2)
+df_ltp['z'] = df_ltp['z'].round(2)
+
+# Create DataFrame for G-code lines (G01 linear moves).
+df_gchord = pd.DataFrame({
+    'G': 'G01',
+    'x': 'X' + df_ltp['x'].map('{:.2f}'.format),
+    'y': 'Y' + df_ltp['y'].map('{:.2f}'.format),
+    'z': 'Z' + df_ltp['z'].map('{:.2f}'.format),
+    'EOB': ';'
+})
+
+# Get first point for header moves.
+first_x = round(df_ltp.iloc[0]['x'], 2)
+first_y = round(df_ltp.iloc[0]['y'], 2)
+first_z = round(df_ltp.iloc[0]['z'], 2)
+
+# Modified G-code header to start from the centroid
+# Initial commands: set modes, start spindle, rapid to center, drop Z, move to first point.
+gcode_header = [
+    "G90 ; (Absolute positioning)",
+    "G21 ; (Set units to millimeters)",
+    "M03 ; (Start spindle)",
+    "S500 ; (Setting spindle speed)",
+    "F1000 ; (Set feedrate)",
+    f"G00 X{center_x:.2f} Y{center_y:.2f} ; (Rapid move to centroid)",
+    f"G01 Z{first_z:.2f} ; (Drop to first point's Z)",
+    f"G01 X{first_x:.2f} Y{first_y:.2f} ; (Move to first toolpath point)"
+]
+
+# Get last point for footer.
+last_x = round(df_ltp.iloc[-1]['x'], 2)
+last_y = round(df_ltp.iloc[-1]['y'], 2)
+
+# Final safe Z is relative to the last point's Z position
+# Compute safe retraction height.
+last_z = df_ltp.iloc[-1]['z']
+final_safe_z = last_z + SAFE_Z_RELATIVE
+
+# Footer: retract to safe Z and end program.
+gcode_footer = [
+    f"G01 X{last_x:.2f} Y{last_y:.2f} Z{final_safe_z:.2f} ; (Retract tool to safe Z)",
+    "M30 ; (End of program)"
+]
+
+# Write G-code to file: header, path commands, footer.
+with open('Gchord.txt', 'w') as f:
+    for line in gcode_header:
+        f.write(line + '\n')
+    df_gchord.to_csv(f, index=False, sep=" ", header=False, mode='a')
+    for line in gcode_footer:
+        f.write(line + '\n')

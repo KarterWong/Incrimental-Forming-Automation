@@ -1,0 +1,45 @@
+import numpy as np
+import pandas as pd
+
+# Load the tool path data from the CSV file
+toolpath = pd.read_csv('toolpath.csv', names=['x', 'y', 'z'], skiprows=1)
+
+# Define a function to test circularity of a layer
+def is_layer_circular(points, tolerance=0.1):
+    # Calculate the centroid of the layer in the x-y plane
+    centroid = points[['x', 'y']].mean().values
+    
+    # Calculate distances of each point from the centroid
+    distances = np.linalg.norm(points[['x', 'y']].values - centroid, axis=1)
+    mean_distance = distances.mean()
+    std_dev = distances.std()
+    
+    # Check if the relative standard deviation is within the tolerance
+    return (std_dev / mean_distance) < tolerance
+
+# Group tool path by z-level
+z_levels = toolpath['z'].unique()
+circular_layers = 0
+
+# Check circularity for each layer
+for z in z_levels:
+    layer_points = toolpath[toolpath['z'] == z]
+    if len(layer_points) < 3:
+        continue  # Skip layers with fewer than 3 points (not enough data to determine circularity)
+    
+    if is_layer_circular(layer_points):
+        circular_layers += 1
+        print(f"Layer at z={z} is circular.")
+    else:
+        print(f"Layer at z={z} is not circular.")
+
+# Calculate the percentage of circular layers
+total_layers = len(z_levels)
+circularity_percentage = (circular_layers / total_layers) * 100
+print(f"Circularity of tool path: {circularity_percentage:.2f}%")
+
+# Decision based on threshold for circular layers
+if circularity_percentage > 90:  # Arbitrary threshold, e.g., 90%
+    print("The tool path is approximately circular.")
+else:
+    print("The tool path is not circular.")

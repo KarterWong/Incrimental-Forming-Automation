@@ -1,0 +1,14 @@
+.HEADER
+BOARD_FILE 3.0 "Creo Parametric 4.0 M080" 2025/05/20.16:04:51 3
+MASTER_MOLD_FREEFORM_TEST_17_V2         MM        
+.END_HEADER
+.BOARD_OUTLINE  MCAD
+0.00000             
+         0           -85.22000           -87.92000             0.00000
+         0             1.70000           -87.92000             0.00000
+         0             1.70000            -1.00000             0.00000
+         0           -85.22000            -1.00000             0.00000
+         0           -85.22000           -87.92000             0.00000
+.END_BOARD_OUTLINE
+.DRILLED_HOLES
+.END_DRILLED_HOLES

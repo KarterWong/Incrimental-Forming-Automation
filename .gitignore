@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+# Virtual envs / tool caches
+.venv/
+venv/
+env/
+.uv-*/
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.yaml
+# OS / editor
+.DS_Store
+Thumbs.db
+*.code-workspace
